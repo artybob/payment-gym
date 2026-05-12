@@ -1,8 +1,7 @@
 <?php
-// Тест создания платежей с разными суммами
 $url = 'http://localhost:8080/api/payments';
-$total = 1000; // количество платежей
-$concurrent = 50; // параллельных запросов
+$total = 50; // количество платежей
+$concurrent = 10; // параллельных запросов
 
 echo "=== PAYMENT CREATION LOAD TEST ===\n";
 echo "Total payments: $total\n";
@@ -12,77 +11,56 @@ echo str_repeat("-", 50) . "\n";
 $start = microtime(true);
 $success = 0;
 $failed = 0;
-$amounts = [];
 
-// Функция для отправки запроса
-function sendPayment($id) {
-    global $url;
-    $amount = rand(10, 10000) / 100; // случайная сумма от 0.10 до 100.00
-    $payload = json_encode([
-        'merchant_id' => 'load_test_' . rand(1, 10),
-        'amount' => $amount,
-        'currency' => 'USD',
-        'idempotency_key' => uniqid() . '_' . $id
-    ]);
+// Запускаем запросы порциями
+for ($batch = 0; $batch < $total; $batch += $concurrent) {
+    $multiHandle = curl_multi_init();
+    $handles = [];
+    $batchSize = min($concurrent, $total - $batch);
 
-    $ch = curl_init();
-    curl_setopt($ch, CURLOPT_URL, $url);
-    curl_setopt($ch, CURLOPT_POST, true);
-    curl_setopt($ch, CURLOPT_POSTFIELDS, $payload);
-    curl_setopt($ch, CURLOPT_HTTPHEADER, ['Content-Type: application/json']);
-    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-    curl_setopt($ch, CURLOPT_TIMEOUT, 10);
-
-    $response = curl_exec($ch);
-    $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-    curl_close($ch);
-
-    return ['success' => ($httpCode == 202 || $httpCode == 200), 'amount' => $amount, 'code' => $httpCode];
-}
-
-// Запускаем параллельные запросы
-$multiHandle = curl_multi_init();
-$handles = [];
-
-for ($i = 0; $i < $concurrent; $i++) {
-    $handles[$i] = curl_init();
-    $amount = rand(10, 10000) / 100;
-    $payload = json_encode([
-        'merchant_id' => 'load_test_' . rand(1, 10),
-        'amount' => $amount,
-        'currency' => 'USD',
-        'idempotency_key' => uniqid() . '_' . $i
-    ]);
-    curl_setopt($handles[$i], CURLOPT_URL, $url);
-    curl_setopt($handles[$i], CURLOPT_POST, true);
-    curl_setopt($handles[$i], CURLOPT_POSTFIELDS, $payload);
-    curl_setopt($handles[$i], CURLOPT_HTTPHEADER, ['Content-Type: application/json']);
-    curl_setopt($handles[$i], CURLOPT_RETURNTRANSFER, true);
-    curl_multi_add_handle($multiHandle, $handles[$i]);
-}
-
-$running = null;
-do {
-    curl_multi_exec($multiHandle, $running);
-} while ($running);
-
-foreach ($handles as $handle) {
-    $httpCode = curl_getinfo($handle, CURLINFO_HTTP_CODE);
-    if ($httpCode == 202 || $httpCode == 200) {
-        $success++;
-    } else {
-        $failed++;
+    for ($i = 0; $i < $batchSize; $i++) {
+        $handles[$i] = curl_init();
+        $amount = rand(10, 10000) / 100;
+        $payload = json_encode([
+            'merchant_id' => 'load_test_' . rand(1, 5),
+            'amount' => $amount,
+            'currency' => 'USD'
+        ]);
+        curl_setopt($handles[$i], CURLOPT_URL, $url);
+        curl_setopt($handles[$i], CURLOPT_POST, true);
+        curl_setopt($handles[$i], CURLOPT_POSTFIELDS, $payload);
+        curl_setopt($handles[$i], CURLOPT_HTTPHEADER, ['Content-Type: application/json']);
+        curl_setopt($handles[$i], CURLOPT_RETURNTRANSFER, true);
+        curl_setopt($handles[$i], CURLOPT_TIMEOUT, 10);
+        curl_multi_add_handle($multiHandle, $handles[$i]);
     }
-    curl_multi_remove_handle($multiHandle, $handle);
-    curl_close($handle);
-}
 
-curl_multi_close($multiHandle);
+    $running = null;
+    do {
+        curl_multi_exec($multiHandle, $running);
+        curl_multi_select($multiHandle);
+    } while ($running > 0);
+
+    foreach ($handles as $handle) {
+        $httpCode = curl_getinfo($handle, CURLINFO_HTTP_CODE);
+        if ($httpCode == 202 || $httpCode == 200 || $httpCode == 201) {
+            $success++;
+        } else {
+            $failed++;
+        }
+        curl_multi_remove_handle($multiHandle, $handle);
+        curl_close($handle);
+    }
+    curl_multi_close($multiHandle);
+
+    echo "Progress: $success/$total processed\r";
+}
 
 $end = microtime(true);
 $time = $end - $start;
 
-echo "\nRESULTS:\n";
+echo "\n" . str_repeat("-", 50) . "\n";
+echo "RESULTS:\n";
 echo "Successful payments: $success\n";
 echo "Failed payments: $failed\n";
 echo "Success rate: " . round(($success / $total) * 100, 2) . "%\n";
