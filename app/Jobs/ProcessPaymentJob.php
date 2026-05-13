@@ -3,13 +3,13 @@
 namespace App\Jobs;
 
 use App\Models\Payment;
+use App\Services\PaymentService;
 use App\Services\ClickHouseService;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\SerializesModels;
 use Illuminate\Support\Facades\Log;
-use Throwable;
 
 class ProcessPaymentJob implements ShouldQueue
 {
@@ -17,33 +17,13 @@ class ProcessPaymentJob implements ShouldQueue
 
     public function __construct(public Payment $payment) {}
 
-    public function handle(ClickHouseService $clickhouse): void
+    public function handle(PaymentService $paymentService, ClickHouseService $clickhouse): void
     {
+        // Обработка платежа
+        $paymentService->processPayment($this->payment);
+
+        // Отправляем в ClickHouse (если нужно)
         try {
-            // Проверяем статус (идемпотентность)
-            if (!in_array($this->payment->status, ['pending', 'processing'])) {
-                Log::info('Payment already processed', ['payment_id' => $this->payment->id]);
-                return;
-            }
-
-            $this->payment->update(['status' => 'processing']);
-
-            // Имитация обработки платежа
-            sleep(3);
-
-            // Успешная обработка
-            $this->payment->update([
-                'status' => 'paid',
-                'processed_at' => now(),
-                'metadata->gateway_response' => 'success'
-            ]);
-
-            Log::info('Payment processed successfully', [
-                'payment_id' => $this->payment->id,
-                'amount' => $this->payment->amount
-            ]);
-
-            // Отправляем в ClickHouse для аналитики
             $clickhouse->insertPayment([
                 'merchant_id' => $this->payment->merchant_id,
                 'amount' => $this->payment->amount,
@@ -52,14 +32,8 @@ class ProcessPaymentJob implements ShouldQueue
                 'payment_id' => $this->payment->id,
             ]);
             Log::info('Payment sent to ClickHouse', ['payment_id' => $this->payment->id]);
-
-        } catch (Throwable $e) {
-            $this->payment->update(['status' => 'failed']);
-            Log::error('Payment processing failed', [
-                'payment_id' => $this->payment->id,
-                'error' => $e->getMessage()
-            ]);
-            throw $e;
+        } catch (\Exception $e) {
+            Log::error('Failed to send to ClickHouse', ['error' => $e->getMessage()]);
         }
     }
 }

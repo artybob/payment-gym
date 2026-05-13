@@ -2,13 +2,19 @@
 
 namespace App\Http\Controllers;
 
-use App\Jobs\ProcessPaymentJob;
-use App\Models\Payment;
+use App\Services\PaymentService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Str;
 
 class PaymentController extends Controller
 {
+    protected PaymentService $paymentService;
+
+    public function __construct(PaymentService $paymentService)
+    {
+        $this->paymentService = $paymentService;
+    }
+
     public function create(Request $request)
     {
         $validated = $request->validate([
@@ -18,24 +24,14 @@ class PaymentController extends Controller
             'idempotency_key' => 'nullable|string|max:255'
         ]);
 
-        $idempotencyKey = $validated['idempotency_key'] ?? Str::uuid()->toString();
-
-        // Проверка идемпотентности
-        $existing = Payment::where('external_id', $idempotencyKey)->first();
-        if ($existing) {
-            return response()->json($existing, 200);
-        }
-
-        $payment = Payment::create([
-            'external_id' => $idempotencyKey,
+        $paymentData = [
             'merchant_id' => $validated['merchant_id'],
             'amount' => $validated['amount'],
             'currency' => $validated['currency'],
-            'status' => 'pending'
-        ]);
+            'external_id' => $validated['idempotency_key'] ?? Str::uuid()->toString(),
+        ];
 
-        // Отправляем в очередь
-        ProcessPaymentJob::dispatch($payment);
+        $payment = $this->paymentService->createPayment($paymentData);
 
         return response()->json($payment, 202);
     }
